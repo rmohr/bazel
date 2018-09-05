@@ -54,14 +54,15 @@ function init_gcov() {
 }
 
 # Computes code coverage data using the clang generated metadata found under $COVERAGE_DIR.
-# Writes the collected coverage into ${COVERAGE_OUTPUT_FILE}.
+# Writes the collected coverage into the given output file.
 function llvm_coverage() {
+  local output_file="${1}"
   export LLVM_PROFILE_FILE="${COVERAGE_DIR}/%h-%p-%m.profraw"
-  "${COVERAGE_GCOV_PATH}" merge -output "${COVERAGE_OUTPUT_FILE}" "${COVERAGE_DIR}"/*.profraw
+  "${COVERAGE_GCOV_PATH}" merge -output "${output_file}" "${COVERAGE_DIR}"/*.profraw
 }
 
 # Computes code coverage data using gcda files found under $COVERAGE_DIR.
-# Writes the collected coverage into ${COVERAGE_OUTPUT_FILE} in lcov format.
+# Writes the collected coverage into the given output file in lcov format.
 function lcov_coverage() {
   local output_file="${1}"
 
@@ -69,6 +70,11 @@ function lcov_coverage() {
     mkdir -p "${COVERAGE_DIR}/$(dirname ${gcno})"
     cp "${ROOT}/${gcno}" "${COVERAGE_DIR}/${gcno}"
   done
+
+  local lcov_tool=$(which lcov)
+  if [[ ! -x $lcov_tool ]]; then
+    lcov_tool=/usr/bin/lcov
+  fi
 
   # Run lcov over the .gcno and .gcda files to generate the lcov tracefile.
   # -c                    - Collect coverage data
@@ -80,11 +86,7 @@ function lcov_coverage() {
   #                         the current directory
   # -d "${COVERAGE_DIR}"  - Directory to search for .gcda files
   # -o "${COVERAGE_OUTPUT_FILE}" - Output file
-  LCOV=$(which lcov)
-  if [[ ! -x $LCOV ]]; then
-    LCOV=/usr/bin/lcov
-  fi
-  $LCOV -c --no-external --ignore-errors graph \
+  $lcov_tool -c --no-external --ignore-errors graph \
       --gcov-tool "${GCOV}" -b /proc/self/cwd \
       -d "${COVERAGE_DIR}" -o "${output_file}"
 
@@ -92,16 +94,32 @@ function lcov_coverage() {
   sed -i -e "s*/proc/self/cwd/**g" "${output_file}"
 }
 
+# Generates a code coverage report in gcov intermediate text format by invoking
+# gcov and using the profile (.gcda) and notes (.gcno) files.
+#
+# The profile files are expected to be found under $COVERAGE_DIR.
+# The notes file are expected to be found under $ROOT.
+#
+# - output_file     The location of the file where the generated code coverage
+#                   report is written.
 function gcov_coverage() {
   local output_file="${1}"
+
+  # Move .gcno files in $COVERAGE_DIR as the gcda files, because gcov
+  # expects them to be under the same directory.
   cat "${COVERAGE_MANIFEST}" | grep ".gcno$" | while read gcno; do
     mkdir -p "${COVERAGE_DIR}/$(dirname ${gcno})"
     cp "$ROOT/${gcno}" "${COVERAGE_DIR}/${gcno}"
     local gcda="${COVERAGE_DIR}/$(dirname ${gcno})/$(basename ${gcno} .gcno).gcda"
-    "${GCOV}" --branch-probabilities --branch-counts --function-summaries --intermediate-format "${gcda}"
+
+    # Invoking gcov for each gcda file. This generates a code coverage report
+    # under the current directory that has the extension ".gcov".
+    "${GCOV}" --branch-probabilities --branch-counts --function-summaries \
+            --intermediate-format "${gcda}"
   done
 
-
+  # Find all the .gcov code coverage reports generated previously and
+  # concatenate them together into the output file.
   find . -name "*.gcov" | while read path; do
     echo "Processing $path"
     cat $path >> "${output_file}"
@@ -111,10 +129,20 @@ function gcov_coverage() {
 function main() {
   init_gcov
 
+  # If llvm code coverage is used, we output the raw code coverage report in
+  # the $COVERAGE_OUTPUT_FILE. This report will not be converted to any other
+  # format by LcovMerger.
   if uses_llvm; then
-    llvm_coverage && exit 0
+    llvm_coverage "$COVERAGE_OUTPUT_FILE" && exit 0
   fi
 
+  # When using either gcov or lcov, use an output file specific to the test
+  # and format used. For lcov we generate a ".dat" output file and for gcov
+  # a ".gcov" output file.
+  # When this script is invoked by tools/test/collect_coverage.sh either of
+  # these two coverage reports will be picked up by LcovMerger and their
+  # content will be converted and/or merged with other reports to an lcov
+  # format, generating the final code coverage report.
   case "$BAZEL_CC_COVERAGE_TOOL" in
         ("gcov") gcov_coverage "$COVERAGE_DIR/_cc_coverage.gcov" ;;
         ("lcov") lcov_coverage "$COVERAGE_DIR/_cc_coverage.dat" ;;
